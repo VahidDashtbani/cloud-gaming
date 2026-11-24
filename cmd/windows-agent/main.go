@@ -4,6 +4,7 @@ import (
 	"cloud-gaming/pkg/protocol"
 	"encoding/json"
 	"flag"
+	"bufio"
 	"io"
 	"log"
 	"os/exec"
@@ -14,6 +15,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
+	"github.com/pion/webrtc/v4/pkg/media/h264reader"
 )
 
 type GameSession struct {
@@ -116,42 +118,116 @@ func (a *WindowsAgent) startStreamPipeline(sess *GameSession) {
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
 		cmd = exec.Command("ffmpeg",
-			"-f", "gdigrab", "-framerate", "60", "-i", "desktop",
-			"-c:v", "h264_nvenc", "-preset", "p1", "-tune", "ull",
-			"-zerolatency", "1", "-bf", "0", "-g", "60",
+			"-loglevel", "info",
+			"-f", "gdigrab", "-framerate", "60", "-draw_mouse", "1", "-i", "desktop",
+			"-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p",
+			"-c:v", "libx264", "-profile:v", "baseline", "-level", "5.1",
+			"-preset", "ultrafast", "-tune", "zerolatency",
+			"-x264opts", "keyint=60:min-keyint=60:scenecut=0:repeat-headers=1",
+			"-bf", "0",
 			"-f", "h264", "pipe:1",
 		)
 	} else {
 		cmd = exec.Command("ffmpeg",
 			"-re", "-f", "lavfi", "-i", "testsrc=size=1280x720:rate=60",
-			"-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-			"-bf", "0", "-g", "60", "-f", "h264", "pipe:1",
+			"-pix_fmt", "yuv420p",
+			"-c:v", "libx264", "-profile:v", "baseline", "-level", "3.1",
+			"-preset", "ultrafast", "-tune", "zerolatency",
+			"-x264opts", "keyint=60:min-keyint=60:scenecut=0:repeat-headers=1",
+			"-bf", "0", "-g", "20",
+			"-f", "h264", "pipe:1",
 		)
 	}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		log.Printf("[FFmpeg StdoutPipe Error] %v", err)
 		return
 	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		log.Printf("[FFmpeg StderrPipe Error] %v", err)
+		return
+	}
+
 	if err := cmd.Start(); err != nil {
-		log.Printf("[FFmpeg Error] %v", err)
+		log.Printf("[FFmpeg Start Error] %v", err)
 		return
 	}
 	sess.FFmpegCmd = cmd
 
-	buf := make([]byte, 65536)
+	go func() {
+		sc := bufio.NewScanner(stderr)
+		for sc.Scan() {
+			log.Printf("[FFmpeg] %s", sc.Text())
+		}
+	}()
+
+	h264Reader, err := h264reader.NewReader(stdout)
+	if err != nil {
+		log.Printf("[H264Reader Error] %v", err)
+		return
+	}
+
+	var sps, pps, pendingPrefix []byte
+	frameDur := time.Second / 60
+	startCode4 := []byte{0x00, 0x00, 0x00, 0x01}
+
 	for {
-		n, err := stdout.Read(buf)
+		nal, err := h264Reader.NextNAL()
 		if err != nil {
 			if err != io.EOF {
-				log.Printf("[Stream Read Ended] %v", err)
+				log.Printf("[H264 Read Ended] %v", err)
 			}
 			return
 		}
-		_ = sess.VideoTrack.WriteSample(media.Sample{
-			Data:     buf[:n],
-			Duration: time.Second / 60,
-		})
+		if nal == nil || len(nal.Data) == 0 {
+			continue
+		}
+
+		// NAL header byte after start code
+		nalType := nal.Data[0] & 0x1F
+		annexB := make([]byte, len(startCode4)+len(nal.Data))
+		copy(annexB, startCode4)
+		copy(annexB[len(startCode4):], nal.Data)
+
+		switch nalType {
+		case 7: // SPS
+			sps = annexB
+			continue
+		case 8: // PPS
+			pps = annexB
+			continue
+		case 9, 6: // AUD, SEI - attach to next actual frame sample
+			pendingPrefix = append(pendingPrefix, annexB...)
+			continue
+		case 5: // IDR (Keyframe)
+			var payload []byte
+			if len(pendingPrefix) > 0 {
+				payload = append(payload, pendingPrefix...)
+				pendingPrefix = nil
+			}
+			if len(sps) > 0 {
+				payload = append(payload, sps...)
+			}
+			if len(pps) > 0 {
+				payload = append(payload, pps...)
+			}
+			payload = append(payload, annexB...)
+			if werr := sess.VideoTrack.WriteSample(media.Sample{Data: payload, Duration: frameDur}); werr != nil {
+				log.Printf("[WriteSample Err] %v", werr)
+			}
+		default: // Non-IDR frame / slice (e.g. nalType == 1)
+			var payload []byte
+			if len(pendingPrefix) > 0 {
+				payload = append(payload, pendingPrefix...)
+				pendingPrefix = nil
+			}
+			payload = append(payload, annexB...)
+			if werr := sess.VideoTrack.WriteSample(media.Sample{Data: payload, Duration: frameDur}); werr != nil {
+				log.Printf("[WriteSample Err] %v", werr)
+			}
+		}
 	}
 }
 
