@@ -1,17 +1,31 @@
 param(
   [string]$InstallDir = "$env:ProgramFiles\CloudGamingAgent",
-  [string]$RelayIP = "127.0.0.1"
+  [string]$PairToken = ""
 )
 
 New-Item -ItemType Directory -Force -Path "C:\CloudGames" | Out-Null
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 
-$startScript = @"
+$pairScript = @"
 @echo off
 cd /d "$InstallDir"
-windows-agent.exe -server ws://$RelayIP:8080/ws/node -node %COMPUTERNAME% -max 5
+set /p TOK="Token ra vared konid (cg1_...): "
+echo %TOK% > "$InstallDir\token.txt"
+windows-agent.exe -token "%TOK%" -node %COMPUTERNAME% -max 5
 pause
 "@
 
-Set-Content -Path "$InstallDir\start-agent.bat" -Value $startScript -Encoding UTF8
-Write-Host "Windows Client installed in $InstallDir and games folder ready at C:\CloudGames"
+Set-Content -Path "$InstallDir\connect-token.bat" -Value $pairScript -Encoding ASCII
+
+if ($PairToken -ne "") {
+  Set-Content -Path "$InstallDir\token.txt" -Value $PairToken -Encoding ASCII
+  $autoStart = @"
+@echo off
+cd /d "$InstallDir"
+windows-agent.exe -token "$PairToken" -node %COMPUTERNAME% -max 5
+pause
+"@
+  Set-Content -Path "$InstallDir\start-agent.bat" -Value $autoStart -Encoding ASCII
+}
+
+Write-Host "Installed in $InstallDir. Run connect-token.bat to enter your pairing token."

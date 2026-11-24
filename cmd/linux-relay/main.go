@@ -2,11 +2,17 @@ package main
 
 import (
 	"cloud-gaming/pkg/protocol"
+	"crypto/rand"
 	_ "embed"
+	"encoding/hex"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -37,16 +43,35 @@ type PlayerSession struct {
 }
 
 type Orchestrator struct {
-	mu       sync.RWMutex
-	nodes    map[string]*WorkerNode
-	sessions map[string]*PlayerSession
+	mu          sync.RWMutex
+	pairToken   string
+	nodes       map[string]*WorkerNode
+	sessions    map[string]*PlayerSession
 }
 
-func NewOrchestrator() *Orchestrator {
+func NewOrchestrator(pairToken string) *Orchestrator {
 	return &Orchestrator{
-		nodes:    make(map[string]*WorkerNode),
-		sessions: make(map[string]*PlayerSession),
+		pairToken: pairToken,
+		nodes:     make(map[string]*WorkerNode),
+		sessions:  make(map[string]*PlayerSession),
 	}
+}
+
+func loadOrCreateSecretToken(tokenFile string) string {
+	if envTok := strings.TrimSpace(os.Getenv("PAIR_TOKEN")); envTok != "" {
+		return envTok
+	}
+	if data, err := os.ReadFile(tokenFile); err == nil {
+		if tok := strings.TrimSpace(string(data)); tok != "" {
+			return tok
+		}
+	}
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	tok := hex.EncodeToString(b)
+	_ = os.MkdirAll(filepath.Dir(tokenFile), 0755)
+	_ = os.WriteFile(tokenFile, []byte(tok+"\n"), 0600)
+	return tok
 }
 
 func (o *Orchestrator) sendToNode(n *WorkerNode, msg protocol.ControlMessage) error {
@@ -85,6 +110,8 @@ func (o *Orchestrator) handleNodeWS(w http.ResponseWriter, r *http.Request) {
 	defer conn.Close()
 
 	var currentNodeID string
+	var authenticated bool
+
 	for {
 		var msg protocol.ControlMessage
 		if err := conn.ReadJSON(&msg); err != nil {
@@ -97,9 +124,17 @@ func (o *Orchestrator) handleNodeWS(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		switch msg.Type {
-		case protocol.MsgNodeRegister:
+		if msg.Type == protocol.MsgNodeRegister {
+			if msg.AuthToken != o.pairToken {
+				log.Printf("[Unauthorized Node Attempt] NodeID=%s", msg.NodeID)
+				_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "Invalid pairing token"))
+				return
+			}
+			authenticated = true
 			currentNodeID = msg.NodeID
+			if currentNodeID == "" {
+				currentNodeID = fmt.Sprintf("win-node-%d", time.Now().UnixNano())
+			}
 			o.mu.Lock()
 			o.nodes[currentNodeID] = &WorkerNode{
 				ID:       currentNodeID,
@@ -111,13 +146,21 @@ func (o *Orchestrator) handleNodeWS(w http.ResponseWriter, r *http.Request) {
 				},
 			}
 			o.mu.Unlock()
-			log.Printf("[Node Registered] Worker: %s", currentNodeID)
+			log.Printf("[Node Registered & Verified] Windows Worker: %s", currentNodeID)
+			continue
+		}
 
+		if !authenticated {
+			_ = conn.Close()
+			return
+		}
+
+		switch msg.Type {
 		case protocol.MsgTelemetry:
 			var stats protocol.HardwareStats
 			if err := json.Unmarshal(msg.Payload, &stats); err == nil {
 				o.mu.Lock()
-				if n, ok := o.nodes[msg.NodeID]; ok {
+				if n, ok := o.nodes[currentNodeID]; ok {
 					n.Stats = stats
 					n.LastSeen = time.Now()
 				}
@@ -125,7 +168,7 @@ func (o *Orchestrator) handleNodeWS(w http.ResponseWriter, r *http.Request) {
 			}
 
 		case protocol.MsgGameAck:
-			log.Printf("[Game Transfer ACK] Node=%s Payload=%s", msg.NodeID, string(msg.Payload))
+			log.Printf("[Game Transfer ACK] Node=%s Payload=%s", currentNodeID, string(msg.Payload))
 
 		case protocol.MsgAllocateResp, protocol.MsgWebRTCAnswer, protocol.MsgWebRTCIce:
 			o.mu.RLock()
@@ -198,7 +241,19 @@ func (o *Orchestrator) handlePlayerWS(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	orch := NewOrchestrator()
+	addr := flag.String("addr", ":8080", "Listen address")
+	publicHost := flag.String("public-host", "127.0.0.1:8080", "Public IP or domain for Windows client pairing token")
+	tokenFile := flag.String("token-file", "./pairing_secret.key", "Path to store secret key")
+	flag.Parse()
+
+	secret := loadOrCreateSecretToken(*tokenFile)
+	relayWS := fmt.Sprintf("ws://%s/ws/node", *publicHost)
+	clientToken := protocol.EncodeTokenBundle(protocol.TokenBundle{
+		RelayWS: relayWS,
+		Token:   secret,
+	})
+
+	orch := NewOrchestrator(secret)
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -214,6 +269,10 @@ func main() {
 		_ = json.NewEncoder(w).Encode(orch.nodes)
 	})
 
-	log.Println("Linux Cloud Gaming Relay running on :8080")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	log.Printf("Linux Cloud Gaming Relay running on %s", *addr)
+	log.Println("================================================================")
+	log.Println("🔑 توکن اتصال کلاینت ویندوز (این را در کلاینت ویندوز وارد کنید):")
+	log.Println(clientToken)
+	log.Println("================================================================")
+	log.Fatal(http.ListenAndServe(*addr, nil))
 }

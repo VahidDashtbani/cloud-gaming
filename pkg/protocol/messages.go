@@ -1,8 +1,11 @@
 package protocol
 
 import (
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
+	"strings"
 )
 
 const (
@@ -18,9 +21,39 @@ const (
 	MsgGameAck        = "game_ack"
 )
 
+type TokenBundle struct {
+	RelayWS string `json:"relay_ws"`
+	Token   string `json:"token"`
+}
+
+func EncodeTokenBundle(b TokenBundle) string {
+	raw, _ := json.Marshal(b)
+	return "cg1_" + base64.RawURLEncoding.EncodeToString(raw)
+}
+
+func DecodeTokenBundle(rawToken string) (TokenBundle, error) {
+	trimmed := strings.TrimSpace(rawToken)
+	if !strings.HasPrefix(trimmed, "cg1_") {
+		return TokenBundle{}, errors.New("فرمت توکن نامعتبر است (باید با cg1_ شروع شود)")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(trimmed, "cg1_"))
+	if err != nil {
+		return TokenBundle{}, errors.New("خطا در دیکد کردن توکن: " + err.Error())
+	}
+	var b TokenBundle
+	if err := json.Unmarshal(payload, &b); err != nil {
+		return TokenBundle{}, errors.New("محتوای توکن نامعتبر است")
+	}
+	if b.RelayWS == "" || b.Token == "" {
+		return TokenBundle{}, errors.New("اطلاعات سرور یا توکن در بسته ناقص است")
+	}
+	return b, nil
+}
+
 type ControlMessage struct {
 	Type      string          `json:"type"`
 	NodeID    string          `json:"node_id,omitempty"`
+	AuthToken string          `json:"auth_token,omitempty"`
 	SessionID string          `json:"session_id,omitempty"`
 	UserID    string          `json:"user_id,omitempty"`
 	Payload   json.RawMessage `json:"payload,omitempty"`
