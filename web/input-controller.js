@@ -1,10 +1,18 @@
-
 // === Full Gameplay Mouse & Keyboard Controller (5-Byte DataChannel) ===
 (() => {
-  const videoEl = document.getElementById("streamVideo");
+  const videoEl =
+    document.getElementById("streamVideo") ||
+    document.getElementById("gameVideo") ||
+    document.querySelector("video");
   if (!videoEl || typeof pc === "undefined") return;
 
   videoEl.tabIndex = 0;
+
+  const INPUT_KEY_DOWN = 1;
+  const INPUT_KEY_UP = 2;
+  const INPUT_MOUSE_MOVE = 3;
+  const INPUT_MOUSE_DOWN = 4;
+  const INPUT_MOUSE_UP = 5;
 
   const inputChannel =
     window.__cgInputChannel ||
@@ -33,19 +41,17 @@
     Period: 0xbe, Slash: 0xbf, Backquote: 0xc0,
   };
 
-  function clampInt8(v) {
-    return Math.max(-127, Math.min(127, Math.round(v || 0)));
+  function clampInt16(v) {
+    return Math.max(-32768, Math.min(32767, Math.round(v || 0)));
   }
 
-  function sendInputPacket(type, code, flags, dx = 0, dy = 0) {
+  function sendPacket(type, val1, val2) {
     if (!inputChannel || inputChannel.readyState !== "open") return;
     const buf = new ArrayBuffer(5);
     const view = new DataView(buf);
     view.setUint8(0, type & 0xff);
-    view.setUint8(1, code & 0xff);
-    view.setUint8(2, flags & 0xff);
-    view.setInt8(3, clampInt8(dx));
-    view.setInt8(4, clampInt8(dy));
+    view.setInt16(1, clampInt16(val1), false);
+    view.setInt16(3, clampInt16(val2), false);
     inputChannel.send(buf);
   }
 
@@ -68,38 +74,26 @@
 
   document.addEventListener("mousemove", (e) => {
     if (document.pointerLockElement !== videoEl && !document.fullscreenElement) return;
-    let remX = e.movementX || 0;
-    let remY = e.movementY || 0;
-    while (remX !== 0 || remY !== 0) {
-      const stepX = clampInt8(remX);
-      const stepY = clampInt8(remY);
-      sendInputPacket(1, 0, 0, stepX, stepY);
-      remX -= stepX;
-      remY -= stepY;
+    const dx = e.movementX || 0;
+    const dy = e.movementY || 0;
+    if (dx !== 0 || dy !== 0) {
+      sendPacket(INPUT_MOUSE_MOVE, dx, dy);
     }
   });
 
   document.addEventListener("mousedown", (e) => {
     if (document.pointerLockElement !== videoEl && document.activeElement !== videoEl) return;
-    const btn = e.button === 0 ? 1 : e.button === 2 ? 2 : e.button === 1 ? 3 : 0;
-    if (!btn) return;
+    // 0 = left button, 1 = right button
+    const btn = e.button === 2 ? 1 : 0;
     e.preventDefault();
-    sendInputPacket(2, btn, 1, 0, 0);
+    sendPacket(INPUT_MOUSE_DOWN, btn, 0);
   });
 
   document.addEventListener("mouseup", (e) => {
-    const btn = e.button === 0 ? 1 : e.button === 2 ? 2 : e.button === 1 ? 3 : 0;
-    if (!btn) return;
+    const btn = e.button === 2 ? 1 : 0;
     e.preventDefault();
-    sendInputPacket(2, btn, 0, 0, 0);
+    sendPacket(INPUT_MOUSE_UP, btn, 0);
   });
-
-  document.addEventListener("wheel", (e) => {
-    if (document.pointerLockElement !== videoEl && document.activeElement !== videoEl) return;
-    e.preventDefault();
-    const scrollStep = clampInt8(-(e.deltaY || 0) / 100);
-    if (scrollStep !== 0) sendInputPacket(4, 0, 0, 0, scrollStep);
-  }, { passive: false });
 
   document.addEventListener("contextmenu", (e) => {
     if (document.pointerLockElement === videoEl || document.activeElement === videoEl) {
@@ -112,20 +106,20 @@
     const vk = CODE_TO_VK[e.code] ?? e.keyCode;
     if (!vk) return;
     e.preventDefault();
-    sendInputPacket(3, vk, 1, 0, 0);
+    sendPacket(INPUT_KEY_DOWN, vk, 0);
   }, { passive: false });
 
   window.addEventListener("keyup", (e) => {
     const vk = CODE_TO_VK[e.code] ?? e.keyCode;
     if (!vk) return;
     e.preventDefault();
-    sendInputPacket(3, vk, 0, 0, 0);
+    sendPacket(INPUT_KEY_UP, vk, 0);
   }, { passive: false });
 
   window.addEventListener("blur", () => {
     if (!inputChannel || inputChannel.readyState !== "open") return;
     for (const vk of Object.values(CODE_TO_VK)) {
-      sendInputPacket(3, vk, 0, 0, 0);
+      sendPacket(INPUT_KEY_UP, vk, 0);
     }
   });
 })();

@@ -56,7 +56,13 @@ func (a *WindowsAgent) allocateSession(req protocol.AllocateRequest) {
 	}
 
 	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{
-		ICEServers: []webrtc.ICEServer{{URLs: []string{"stun:stun.l.google.com:19302"}}},
+		ICEServers: []webrtc.ICEServer{
+			{URLs: []string{
+				"stun:stun.l.google.com:19302",
+				"stun:stun1.l.google.com:19302",
+				"stun:stun2.l.google.com:19302",
+			}},
+		},
 	})
 	if err != nil {
 		a.mu.Unlock()
@@ -73,13 +79,26 @@ func (a *WindowsAgent) allocateSession(req protocol.AllocateRequest) {
 	}
 	_, _ = pc.AddTrack(videoTrack)
 
+	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
+		log.Printf("[Session %s] ICE State: %s", req.SessionID, state.String())
+	})
+	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		log.Printf("[Session %s] PC State: %s", req.SessionID, state.String())
+	})
+
 	pc.OnDataChannel(func(dc *webrtc.DataChannel) {
+		log.Printf("[Session %s] DataChannel opened: label=%s", req.SessionID, dc.Label())
 		if dc.Label() != "input" {
 			return
 		}
+		dc.OnOpen(func() {
+			log.Printf("[Session %s] Input DataChannel ready", req.SessionID)
+		})
 		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 			if pkt, ok := protocol.DecodeInput(msg.Data); ok {
 				InjectInput(pkt)
+			} else {
+				log.Printf("[Input Decode Fail] len=%d raw=%x", len(msg.Data), msg.Data)
 			}
 		})
 	})
@@ -346,9 +365,19 @@ func main() {
 
 			var offer webrtc.SessionDescription
 			_ = json.Unmarshal(msg.Payload, &offer)
-			_ = sess.PeerConn.SetRemoteDescription(offer)
-			answer, _ := sess.PeerConn.CreateAnswer(nil)
-			_ = sess.PeerConn.SetLocalDescription(answer)
+			if err := sess.PeerConn.SetRemoteDescription(offer); err != nil {
+				log.Printf("[SetRemoteDesc Err] %s: %v", msg.SessionID, err)
+				continue
+			}
+			answer, err := sess.PeerConn.CreateAnswer(nil)
+			if err != nil {
+				log.Printf("[CreateAnswer Err] %s: %v", msg.SessionID, err)
+				continue
+			}
+			if err := sess.PeerConn.SetLocalDescription(answer); err != nil {
+				log.Printf("[SetLocalDesc Err] %s: %v", msg.SessionID, err)
+				continue
+			}
 
 			ansBytes, _ := json.Marshal(answer)
 			agent.sendJSON(protocol.ControlMessage{
@@ -364,7 +393,9 @@ func main() {
 			if ok {
 				var cand webrtc.ICECandidateInit
 				_ = json.Unmarshal(msg.Payload, &cand)
-				_ = sess.PeerConn.AddICECandidate(cand)
+				if err := sess.PeerConn.AddICECandidate(cand); err != nil {
+					log.Printf("[AddICECandidate Err] %s: %v", msg.SessionID, err)
+				}
 			}
 		}
 	}

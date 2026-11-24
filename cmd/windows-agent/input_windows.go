@@ -14,14 +14,14 @@ var (
 )
 
 const (
-	INPUT_MOUSE          = 0
-	INPUT_KEYBOARD       = 1
-	KEYEVENTF_KEYUP      = 0x0002
-	MOUSEEVENTF_MOVE     = 0x0001
-	MOUSEEVENTF_LEFTDOWN = 0x0002
-	MOUSEEVENTF_LEFTUP   = 0x0004
-	MOUSEEVENTF_RIGHTDN  = 0x0008
-	MOUSEEVENTF_RIGHTUP  = 0x0010
+	INPUT_MOUSE          uint32 = 0
+	INPUT_KEYBOARD       uint32 = 1
+	KEYEVENTF_KEYUP      uint32 = 0x0002
+	MOUSEEVENTF_MOVE     uint32 = 0x0001
+	MOUSEEVENTF_LEFTDOWN uint32 = 0x0002
+	MOUSEEVENTF_LEFTUP   uint32 = 0x0004
+	MOUSEEVENTF_RIGHTDN  uint32 = 0x0008
+	MOUSEEVENTF_RIGHTUP  uint32 = 0x0010
 )
 
 type MOUSEINPUT struct {
@@ -41,18 +41,20 @@ type KEYBDINPUT struct {
 	DwExtraInfo uintptr
 }
 
-type INPUT_UNION struct {
+// Windows 64-bit INPUT layout: Type (uint32) + 4-byte alignment pad + 32-byte union
+type WIN_INPUT struct {
 	Type uint32
-	Mi   MOUSEINPUT
+	_pad uint32
+	Data [32]byte
 }
 
 func InjectInput(pkt protocol.InputPacket) {
-	var in INPUT_UNION
+	var in WIN_INPUT
 
 	switch pkt.Type {
 	case protocol.InputKeyDown, protocol.InputKeyUp:
 		in.Type = INPUT_KEYBOARD
-		ki := (*KEYBDINPUT)(unsafe.Pointer(&in.Mi))
+		ki := (*KEYBDINPUT)(unsafe.Pointer(&in.Data[0]))
 		ki.WVk = uint16(pkt.Val1)
 		if pkt.Type == protocol.InputKeyUp {
 			ki.DwFlags = KEYEVENTF_KEYUP
@@ -60,25 +62,30 @@ func InjectInput(pkt protocol.InputPacket) {
 
 	case protocol.InputMouseMove:
 		in.Type = INPUT_MOUSE
-		in.Mi.Dx = int32(pkt.Val1)
-		in.Mi.Dy = int32(pkt.Val2)
-		in.Mi.DwFlags = MOUSEEVENTF_MOVE
+		mi := (*MOUSEINPUT)(unsafe.Pointer(&in.Data[0]))
+		mi.Dx = int32(pkt.Val1)
+		mi.Dy = int32(pkt.Val2)
+		mi.DwFlags = MOUSEEVENTF_MOVE
 
 	case protocol.InputMouseDown:
 		in.Type = INPUT_MOUSE
+		mi := (*MOUSEINPUT)(unsafe.Pointer(&in.Data[0]))
 		if pkt.Val1 == 0 {
-			in.Mi.DwFlags = MOUSEEVENTF_LEFTDOWN
+			mi.DwFlags = MOUSEEVENTF_LEFTDOWN
 		} else {
-			in.Mi.DwFlags = MOUSEEVENTF_RIGHTDN
+			mi.DwFlags = MOUSEEVENTF_RIGHTDN
 		}
 
 	case protocol.InputMouseUp:
 		in.Type = INPUT_MOUSE
+		mi := (*MOUSEINPUT)(unsafe.Pointer(&in.Data[0]))
 		if pkt.Val1 == 0 {
-			in.Mi.DwFlags = MOUSEEVENTF_LEFTUP
+			mi.DwFlags = MOUSEEVENTF_LEFTUP
 		} else {
-			in.Mi.DwFlags = MOUSEEVENTF_RIGHTUP
+			mi.DwFlags = MOUSEEVENTF_RIGHTUP
 		}
+	default:
+		return
 	}
 
 	procSendInput.Call(
