@@ -1,0 +1,16 @@
+[Unit]
+Description=Cloud Gaming Linux Relay & Control Plane
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/cloud-gaming
+ExecStart=/opt/cloud-gaming/linux-relay
+Restart=always
+RestartSec=3
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

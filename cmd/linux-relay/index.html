@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <title>Cloud Gaming Client</title>
+  <style>
+    body { background: #0d1117; color: #c9d1d9; font-family: system-ui; margin: 0; display: flex; flex-direction: column; align-items: center; }
+    header { width: 100%; padding: 12px 24px; background: #161b22; display: flex; justify-content: space-between; align-items: center; box-sizing: border-box; }
+    #stream-box { position: relative; margin-top: 20px; border: 2px solid #30363d; border-radius: 8px; overflow: hidden; }
+    video { width: 1280px; height: 720px; max-width: 96vw; background: #000; display: block; }
+    button { background: #238636; color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: bold; }
+    #status { font-family: monospace; color: #58a6ff; }
+  </style>
+</head>
+<body>
+  <header>
+    <div>🎮 پلتفرم ابری بازی (WebRTC Ultra-Low Latency)</div>
+    <div id="status">آماده اتصال...</div>
+    <button id="startBtn">شروع بازی و قفل موس</button>
+  </header>
+
+  <div id="stream-box">
+    <video id="gameVideo" autoplay playsinline muted></video>
+  </div>
+
+  <script>
+    const statusEl = document.getElementById('status');
+    const videoEl = document.getElementById('gameVideo');
+    const startBtn = document.getElementById('startBtn');
+    let dc = null;
+
+    function sendInput(type, val1, val2) {
+      if (!dc || dc.readyState !== 'open') return;
+      const buf = new ArrayBuffer(5);
+      const view = new DataView(buf);
+      view.setUint8(0, type);
+      view.setInt16(1, val1, false);
+      view.setInt16(3, val2, false);
+      dc.send(buf);
+    }
+
+    startBtn.onclick = async () => {
+      if (videoEl.requestPointerLock) {
+        videoEl.requestPointerLock();
+      }
+      const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const ws = new WebSocket(`${wsProto}//${location.host}/ws/play?user=player1`);
+
+      const pc = new RTCPeerConnection({
+        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+      });
+
+      dc = pc.createDataChannel('input', { ordered: false, maxRetransmits: 0 });
+      dc.onopen = () => statusEl.innerText = 'متصل شد (ورودی فعال)';
+
+      pc.ontrack = (event) => {
+        videoEl.srcObject = event.streams[0];
+      };
+
+      pc.onicecandidate = (event) => {
+        if (event.candidate) {
+          ws.send(JSON.stringify({ type: 'webrtc_ice', payload: event.candidate }));
+        }
+      };
+
+      ws.onmessage = async (event) => {
+        const msg = JSON.parse(event.data);
+        if (msg.error) {
+          statusEl.innerText = msg.error;
+          return;
+        }
+        if (msg.type === 'allocate_resp') {
+          let payload = msg.payload;
+          if (typeof payload === 'string') payload = JSON.parse(payload);
+          if (!payload.success) {
+            statusEl.innerText = 'خطا در تخصیص سشن: ' + payload.error;
+            return;
+          }
+          const offer = await pc.createOffer({ offerToReceiveVideo: true, offerToReceiveAudio: true });
+          await pc.setLocalDescription(offer);
+          ws.send(JSON.stringify({ type: 'webrtc_offer', payload: offer }));
+        } else if (msg.type === 'webrtc_answer') {
+          await pc.setRemoteDescription(new RTCSessionDescription(msg.payload));
+        } else if (msg.type === 'webrtc_ice') {
+          await pc.addIceCandidate(new RTCIceCandidate(msg.payload));
+        }
+      };
+    };
+
+    window.addEventListener('keydown', (e) => {
+      if (document.pointerLockElement === videoEl) {
+        e.preventDefault();
+        sendInput(1, e.keyCode, 0);
+      }
+    });
+
+    window.addEventListener('keyup', (e) => {
+      if (document.pointerLockElement === videoEl) {
+        e.preventDefault();
+        sendInput(2, e.keyCode, 0);
+      }
+    });
+
+    window.addEventListener('mousemove', (e) => {
+      if (document.pointerLockElement === videoEl) {
+        sendInput(3, e.movementX, e.movementY);
+      }
+    });
+
+    window.addEventListener('mousedown', (e) => {
+      if (document.pointerLockElement === videoEl) {
+        sendInput(4, e.button, 0);
+      }
+    });
+
+    window.addEventListener('mouseup', (e) => {
+      if (document.pointerLockElement === videoEl) {
+        sendInput(5, e.button, 0);
+      }
+    });
+  </script>
+</body>
+</html>
